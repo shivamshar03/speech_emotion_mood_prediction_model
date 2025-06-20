@@ -1,0 +1,14 @@
+librosa
+pandas
+tensorflow
+scikit-learn
+langchain-groq
+langchain
+langchain-community
+numpy
+keras
+dotenv
+SpeechRecognition
+pyaudio
+pydub
+git+https://github.com/openai/whisper.git
