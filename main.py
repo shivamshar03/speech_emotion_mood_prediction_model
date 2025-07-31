@@ -1,3 +1,6 @@
+import os
+import warnings
+import logging
 import librosa
 import numpy as np
 import speech_recognition as sr
@@ -8,122 +11,112 @@ from langchain.prompts import PromptTemplate
 from langchain.chains import LLMChain
 from dotenv import load_dotenv
 from pydub import AudioSegment
-import whisper
 
+# Suppress warnings and logs
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+warnings.filterwarnings("ignore")
+logging.getLogger().setLevel(logging.ERROR)
 
 load_dotenv()
 
-# Load the model
-model = load_model("speech_emotion_recognition_model.keras")
-# audio_path = "/content/angry.mp3"
-sst_model = whisper.load_model("small")
+# Load emotion model
+try:
+    model = load_model("speech_emotion_recognition_model.keras")
+except Exception as e:
+    print(f" Failed to load emotion model: {e}")
+    exit()
 
-
+# Recording and transcription using sr
 def recording():
-    # Initialize the recognizer
     recognizer = sr.Recognizer()
+    try:
+        with sr.Microphone() as source:
+            print("🎙 Listening... Speak something:")
+            recognizer.adjust_for_ambient_noise(source)
+            audio = recognizer.listen(source)
+            print(" Processing...")
 
-    # Use the default microphone as the audio source
-    with sr.Microphone() as source:
-        print("🎤 Listening... Speak something:")
-        recognizer.adjust_for_ambient_noise(source)
-        audio = recognizer.listen(source)
+            # Transcribe the speech
+            try:
+                text = recognizer.recognize_google(audio)
+                print(" Transcription:", text)
+            except sr.UnknownValueError:
+                print(" Could not understand the audio.")
+                text = ""
+            except sr.RequestError as e:
+                print(f"⚠ Could not request results; {e}")
+                text = ""
 
-        print("🔁 Processing...")
+            # Save audio to .wav
+            wav_path = "recorded_audio.wav"
+            with open(wav_path, "wb") as f:
+                f.write(audio.get_wav_data())
+            print(" Audio saved as", wav_path)
 
-        with open("recorded_audio.wav", "wb") as f:
-            f.write(audio.get_wav_data())
-        print("💾 Audio saved as recorded_audio.wav")
+            # Convert to .mp3
+            try:
+                mp3_path = "audio.mp3"
+                sound = AudioSegment.from_wav(wav_path)
+                sound.export(mp3_path, format="mp3")
+                print(" Converted to MP3:", mp3_path)
+            except Exception as e:
+                print(f" Error converting to MP3: {e}")
+                return text, None
 
-        # Convert WAV to MP3
-        sound = AudioSegment.from_wav("recorded_audio.wav")
-        sound.export("audio.mp3", format="mp3")
-        print("✅ Audio converted and saved as audio.mp3")
-        audio_path = "audio.mp3"
+            return text, mp3_path
 
-        try:
-            # Transcribe using Google's speech recognition
-            text = recognizer.recognize_google(audio)
-            print("📝 Transcription: " + text)
-        except sr.UnknownValueError:
-            print("❌ Could not understand the audio.")
-        except sr.RequestError:
-            print("⚠️ Could not request results from the speech recognition service.")
-        return text , audio_path
+    except Exception as e:
+        print(f" Error during recording: {e}")
+        return "", None
 
 
-
+# Feature extraction
 def extract_features(data, sample_rate=22050):
-    # ZCR
-    result = np.array([])
-    zcr = np.mean(librosa.feature.zero_crossing_rate(y=data).T, axis=0)
-    result=np.hstack((result, zcr)) # stacking horizontally
-
-    # Chroma_stft
-    stft = np.abs(librosa.stft(data))
-    chroma_stft = np.mean(librosa.feature.chroma_stft(S=stft, sr=sample_rate).T, axis=0)
-    result = np.hstack((result, chroma_stft)) # stacking horizontally
-
-    # MFCC
-    mfcc = np.mean(librosa.feature.mfcc(y=data, sr=sample_rate).T, axis=0)
-    result = np.hstack((result, mfcc)) # stacking horizontally
-
-    # Root Mean Square Value
-    rms = np.mean(librosa.feature.rms(y=data).T, axis=0)
-    result = np.hstack((result, rms)) # stacking horizontally
-
-    # MelSpectogram
-    mel = np.mean(librosa.feature.melspectrogram(y=data, sr=sample_rate).T, axis=0)
-    result = np.hstack((result, mel)) # stacking horizontally
-
-    return result
+    try:
+        result = np.array([])
+        result = np.hstack((result, np.mean(librosa.feature.zero_crossing_rate(y=data).T, axis=0)))
+        stft = np.abs(librosa.stft(data))
+        result = np.hstack((result, np.mean(librosa.feature.chroma_stft(S=stft, sr=sample_rate).T, axis=0)))
+        result = np.hstack((result, np.mean(librosa.feature.mfcc(y=data, sr=sample_rate).T, axis=0)))
+        result = np.hstack((result, np.mean(librosa.feature.rms(y=data).T, axis=0)))
+        result = np.hstack((result, np.mean(librosa.feature.melspectrogram(y=data, sr=sample_rate).T, axis=0)))
+        return result
+    except Exception as e:
+        print(f" Feature extraction failed: {e}")
+        return None
 
 
+# Emotion prediction
 def model_prediction(audio_path):
-    emotion_categories = ['angry', 'calm', 'disgust', 'fear', 'happy', 'neutral', 'sad', 'surprise']
-    encoder = LabelEncoder()
-    encoder.fit(emotion_categories)
-    y, sr = librosa.load(audio_path)
-    sample_rate = sr
+    try:
+        categories = ['angry', 'calm', 'disgust', 'fear', 'happy', 'neutral', 'sad', 'surprise']
+        encoder = LabelEncoder()
+        encoder.fit(categories)
 
-    features = extract_features(y, sample_rate=sample_rate)
+        y, sr = librosa.load(audio_path)
+        features = extract_features(y, sample_rate=sr)
 
-    reshaped_features = np.expand_dims(np.expand_dims(features, axis=0), axis=2)
+        if features is None:
+            raise ValueError("Features are None")
 
-    # Make the prediction
-    prediction = model.predict(reshaped_features)
+        reshaped = np.expand_dims(np.expand_dims(features, axis=0), axis=2)
+        prediction = model.predict(reshaped)
+        index = np.argmax(prediction)
+        predicted_emotion = encoder.classes_[index]
 
-    # Get the predicted emotion label
-    predicted_emotion_index = np.argmax(prediction)
-    emotion_categories = encoder.classes_ # Get the list of emotion labels from the encoder
+        print(" Model Emotion Prediction:", predicted_emotion)
+        return predicted_emotion
 
-    predicted_emotion = emotion_categories[predicted_emotion_index]
-
-    print(f"The predicted emotion for {audio_path} is: {predicted_emotion}")
-    return predicted_emotion
-    print("Raw prediction probabilities:", prediction)
-
+    except Exception as e:
+        print(f" Emotion prediction failed: {e}")
+        return "unknown"
 
 
-#
-# try:
-#     text, audio_path = recording()
-# except :
-#     audio_path = "angry.mp3"
-#     result_text = model.transcribe(audio_path, fp16=False)
-#     text = result_text["text"]
+# LangChain LLM setup
+llm = ChatGroq(model_name="llama-3.3-70b-versatile")
 
-audio_path = "C:\\Users\\acer\\PycharmProjects\\speech_emotion_mood\\angry.mp3"
-result_text = sst_model.transcribe(audio_path, fp16=False)
-text = result_text["text"]
-
-llm = ChatGroq(
-    model_name="llama-3.3-70b-versatile",
-    )
-
-# Define the prompt template
 prompt = PromptTemplate(
-    input_variables=["sentence","prediction"],
+    input_variables=["sentence", "prediction"],
     template="""
 You are an expert in emotion and mood detection.
 Given a sentence and a model's prediction, evaluate the emotion **accurately**, especially when the model might be wrong. Return:
@@ -139,24 +132,30 @@ Instruction: There is a high chance the prediction is incorrect. You must analyz
 Respond in the following format:
 Emotion: <one word>
 Mood: <one word>
-
 """
 )
 
-# Create a LangChain LLMChain
 emotion_chain = LLMChain(llm=llm, prompt=prompt)
 
-# Example usage
+# --- Main Flow ---
+try:
+    text, audio_path = recording()
+    if not audio_path:
+        print(" Recording failed. Exiting.")
+        exit()
 
-result = emotion_chain.run(sentence = text , prediction=model_prediction(audio_path))
+    predicted_emotion = model_prediction(audio_path)
 
-# Print the result
-print("Input Sentence:", text)
+    try:
+        result = emotion_chain.run(sentence=text, prediction=predicted_emotion)
+    except Exception as e:
+        print(f" LLM response failed: {e}")
+        result = "Emotion: unknown\nMood: unknown"
 
-print("Predicted Emotion:", result)
+    print("\n--- Final Output ---")
+    print("🎙 Input Sentence:", text)
+    print(" Model Prediction:", predicted_emotion)
+    print(" LLM Refined Output:\n", result)
 
-
-
-
-
-
+except Exception as e:
+    print(f" Unexpected error in execution: {e}")
